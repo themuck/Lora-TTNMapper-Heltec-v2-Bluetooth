@@ -68,12 +68,12 @@ TinyGPSPlus gps;
 U8X8_SSD1306_128X64_NONAME_SW_I2C u8x8(15, 4, 16);
 
 /* LoRaWAN network session key  */
-static const PROGMEM u1_t NWKSKEY[16] = {0x3A, 0x57, 0xE4, 0x86, 0x0B, 0x0C, 0x0A, 0x6A, 0x4A, 0xA5, 0xCE, 0x3A, 0xAD, 0x7A, 0x52, 0x1E};
+static const PROGMEM u1_t NWKSKEY[16] = {};
 /* LoRaWAN application session key */ 
-static const u1_t PROGMEM APPSKEY[16] = {0xD5, 0x9C, 0xF6, 0xEB, 0x14, 0xD7, 0x81, 0x60, 0xD3, 0xD4, 0xEC, 0x1E, 0x3A, 0x61, 0x41, 0x65};
+static const u1_t PROGMEM APPSKEY[16] = {};
 
 /* LoRaWAN device address */
-static const u4_t DEVADDR = 0x2260BAE7A ;  
+static const u4_t DEVADDR = 0x ;  
 
 /* These callbacks are only used in over-the-air activation, so they are left empty here. We cannot  */
 /* leave them out completely unless DISABLE_JOIN is set in config.h, otherwise the linker will complain */
