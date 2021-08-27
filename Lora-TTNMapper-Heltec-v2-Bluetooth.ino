@@ -6,16 +6,16 @@
  Copyright (c) 2018 sbiermann: https://github.com/sbiermann/Lora-TTNMapper-ESP32
  Copyright (c) 2019 sistemasorp: https://github.com/sistemasorp/Heltec-Wifi-Lora-32-TTN-Mapper
  Copyright (c) 2020 Stefan Onderka: https://www.onderka.com/computer-und-netzwerk/ttnmapper-node-mit-heltec-sx1276-lora-esp32-v2
- Copyright (c) 2021 Malte Knaust https://github.com/themuck/Lora-TTNMapper-Heltec-v2-Bluetooth
-
+ Copyright (c) 2021 the_muck: https://github.com/themuck/Lora-TTNMapper-Heltec-v2-Bluetooth
  Case: https://www.thingiverse.com/thing:4145143
 
- This code expects a serial connected GPS module like an U-Blox NEO-6m, you may change baud rate and pins. 
+ This code expects a serial connected GPS module like an U-Blox NEO-6m, you may change baud rate and pins.
  Default is GPIO 2 Rx and GPIO 17 Tx (Closest to "end" of board), speed 9600 Baud. Use 3V3 or Vext for GPS power
- 
- Set your gateway GPS coordinates to show distance and direction when mapping and Bluetooth Communication to set the spreading factor!
 
- The activation method of the TTN device has to be ABP. 
+ Set your gateway GPS coordinates to show distance and direction when mapping.
+
+ The activation method of the TTN device has to be ABP, and is mostly written for eu868! Have a look at the channel setup of TTn 0-2!
+ Enable "Skip payload encryption and decryption" in device Application layer settings
 
  Libraries needed: U8x8 (From U8g2), TinyGPS++, IBM LMIC, SPI, Wifi
 -----------------------------------------------------------------------------------------------------------
@@ -24,7 +24,7 @@
 /* Hardware serial */
 #include <HardwareSerial.h>
 /* GPS */
-#include <TinyGPSPlus.h>
+#include <TinyGPS++.h>
 /* LoraMAC-in-C */
 #include <lmic.h>
 /* Hardware abstraction layer */
@@ -35,12 +35,16 @@
 #include <U8x8lib.h>
 /* Wireless */
 #include "WiFi.h"
+/* Bluetooth */
+#include "BluetoothSerial.h"
+
+
 
 /* Integrated LED (white) */
 #define BUILTIN_LED 25
 /* GPS Rx pin */
 #define GPS_RX 13
-/* GPS Tx pin */  
+/* GPS Tx pin */
 #define GPS_TX 12
 /* GPS baud rate */
 #define GPS_BAUD 9600
@@ -50,7 +54,7 @@ const double HOME_LAT = 49.000000;
 const double HOME_LNG = 11.000000;
 
 /* Initial sending interval in seconds */
-const unsigned TX_INTERVAL = 15;
+const unsigned TX_INTERVAL = 60; //fair air time use in TTN 
 
 /* Upper TinyGPS++ HDOP value limit to send Pakets with */
 int HDOP_MAX = 300; // Set to 200-500 (HDOP 2.00 - 5.00)
@@ -64,16 +68,29 @@ HardwareSerial GPSSerial(1);
 /* Init GPS */
 TinyGPSPlus gps;
 
+BluetoothSerial ESP_BT;
+String BT_state;
+
+bool BT_new_data = false;
+
+int channel = 0;
+bool new_channel = false;
+bool enable_ch08 = false;
+bool enable_ch02 = false;
+int channel_state = 10;
+int SF_state = 7;
+
+
 /* Define OLED (RST, SCL, SDA - See pinout) */
 U8X8_SSD1306_128X64_NONAME_SW_I2C u8x8(15, 4, 16);
 
 /* LoRaWAN network session key  */
 static const PROGMEM u1_t NWKSKEY[16] = {};
-/* LoRaWAN application session key */ 
+/* LoRaWAN application session key */
 static const u1_t PROGMEM APPSKEY[16] = {};
 
 /* LoRaWAN device address */
-static const u4_t DEVADDR = 0x ;  
+static const u4_t DEVADDR = 0x ;
 
 /* These callbacks are only used in over-the-air activation, so they are left empty here. We cannot  */
 /* leave them out completely unless DISABLE_JOIN is set in config.h, otherwise the linker will complain */
@@ -99,13 +116,13 @@ char sbuf[16];
 
 void build_packet() {
   /* For sprintf to OLED display */
-  char s[16]; 
+  char s[16];
   String toLog;
-  
+
   uint32_t LatitudeBinary, LongitudeBinary;
   uint16_t altitudeGps;
   uint8_t hdopGps;
-  
+
   while (GPSSerial.available())
     gps.encode(GPSSerial.read());
 
@@ -159,7 +176,7 @@ void build_packet() {
     Serial.println(fromhome/1000);
   }
   Serial.print("Direction to GW:      ");
-  Serial.print((String)gps.cardinal(direction_home) + " (" + (String)direction_home + "°)");
+  Serial.print((String)gps.cardinal(direction_home) + " (" + (String)direction_home + "Â°)");
 
   /*
   Serial.print("Characters processed: ");
@@ -271,57 +288,74 @@ void onEvent (ev_t ev) {
   switch (ev) {
     case EV_SCAN_TIMEOUT:
       Serial.println(F("> EV_SCAN_TIMEOUT"));
+      ESP_BT.println(F("> EV_SCAN_TIMEOUT"));
       u8x8.drawString(0, 7, "EV_SCAN_TIMEOUT ");
       break;
     case EV_BEACON_FOUND:
       Serial.println(F("> EV_BEACON_FOUND"));
+      ESP_BT.println(F("> EV_BEACON_FOUND"));
       u8x8.drawString(0, 7, "EV_BEACON_FOUND ");
       break;
     case EV_BEACON_MISSED:
       Serial.println(F("> EV_BEACON_MISSED"));
+      ESP_BT.println(F("> EV_BEACON_MISSED"));
       u8x8.drawString(0, 7, "EV_BEACON_MISSED");
       break;
     case EV_BEACON_TRACKED:
       Serial.println(F("> EV_BEACON_TRACKED"));
+      ESP_BT.println(F("> EV_BEACON_TRACKED"));
       u8x8.drawString(0, 7, "EV_BEACON_TRACKD");
       break;
     case EV_JOINING:
       Serial.println(F("> EV_JOINING"));
+      ESP_BT.println(F("> EV_JOINING"));
       u8x8.drawString(0, 7, "EV_JOINING      ");
       break;
     case EV_JOINED:
       Serial.println(F("> EV_JOINED"));
+      ESP_BT.println(F("> EV_JOINED"));
       u8x8.drawString(0, 7, "EV_JOINED       ");
       /* Disable link check validation (automatically enabled during join, but not supported by TTN at this time). */
       LMIC_setLinkCheckMode(0);
       break;
     case EV_RFU1:
       Serial.println(F("> EV_RFU1"));
+      ESP_BT.println(F("> EV_RFU1"));
       u8x8.drawString(0, 7, "EV_RFUI         ");
       break;
     case EV_JOIN_FAILED:
       Serial.println(F("> EV_JOIN_FAILED"));
+      ESP_BT.println(F("> EV_JOIN_FAILED"));
       u8x8.drawString(0, 7, "EV_JOIN_FAILED  ");
       break;
     case EV_REJOIN_FAILED:
       Serial.println(F("> EV_REJOIN_FAILED"));
+      ESP_BT.println(F("> EV_REJOIN_FAILED"));
       u8x8.drawString(0, 7, "EV_REJOIN_FAILED");
       //break;
       break;
     case EV_TXCOMPLETE:
       Serial.println(F("> EV_TXCOMPLETE (including wait for RX window)"));
+      ESP_BT.println(F("> EV_TXCOMPLETE (including wait for RX window)"));
       u8x8.drawString(0, 7, "EV_TXCOMPLETE   ");
+
       digitalWrite(BUILTIN_LED, LOW);
       if (LMIC.txrxFlags & TXRX_ACK) {
         /* Received ACK */
         Serial.println(F("Received ack"));
+        ESP_BT.println(F("Received ack"));
         u8x8.drawString(0, 7, "ACK RECEIVED    ");
+
       }
       if (LMIC.dataLen) {
         /* Received data */
         Serial.println(F("Received "));
         Serial.println(LMIC.dataLen);
         Serial.println(F(" bytes payload"));
+
+        ESP_BT.println(F("Received "));
+        ESP_BT.println(LMIC.dataLen);
+        ESP_BT.println(F(" bytes payload"));
 
         u8x8.clearLine(6);
         u8x8.drawString(0, 6, "RX ");
@@ -336,26 +370,32 @@ void onEvent (ev_t ev) {
       break;
     case EV_LOST_TSYNC:
       Serial.println(F("> EV_LOST_TSYNC"));
+      ESP_BT.println(F("> EV_LOST_TSYNC"));
       u8x8.drawString(0, 7, "EV_LOST_TSYNC   ");
       break;
     case EV_RESET:
       Serial.println(F("> EV_RESET"));
+      ESP_BT.println(F("> EV_RESET"));
       u8x8.drawString(0, 7, "EV_RESET        ");
       break;
     case EV_RXCOMPLETE:
       Serial.println(F("> EV_RXCOMPLETE"));
+      ESP_BT.println(F("> EV_RXCOMPLETE"));
       u8x8.drawString(0, 7, "EV_RXCOMPLETE   ");
       break;
     case EV_LINK_DEAD:
       Serial.println(F("> EV_LINK_DEAD"));
+      ESP_BT.println(F("> EV_LINK_DEAD"));
       u8x8.drawString(0, 7, "EV_LINK_DEAD    ");
       break;
     case EV_LINK_ALIVE:
       Serial.println(F("> EV_LINK_ALIVE"));
+      ESP_BT.println(F("> EV_LINK_ALIVE"));
       u8x8.drawString(0, 7, "EV_LINK_ALIVE   ");
       break;
     default:
       Serial.println(F("Unknown event"));
+      ESP_BT.println(F("Unknown event"));
       u8x8.setCursor(0, 7);
       u8x8.printf("UNKNOWN EVT %d", ev);
       break;
@@ -367,7 +407,9 @@ void do_send(osjob_t* j) {
   if (LMIC.opmode & OP_TXRXPEND) {
     /* Tx pending */
     Serial.println(F("> OP_TXRXPEND, not sending"));
+    ESP_BT.println(F("> OP_TXRXPEND, not sending"));
     u8x8.drawString(0, 7, "OP_TXRXPEND, not sent");
+    ESP_BT.println("OP_TXRXPEND, not sent");
   } else {
     /* No pending Tx, Go! */
     build_packet();
@@ -377,35 +419,40 @@ void do_send(osjob_t* j) {
       LMIC_setTxData2(1, txBuffer, sizeof(txBuffer), 0);
       Serial.println();
       Serial.println(F("> PACKET QUEUED"));
+      ESP_BT.println(F("> PACKET QUEUED"));
       u8x8.drawString(0, 7, "PACKET_QUEUED  ");
+
       digitalWrite(BUILTIN_LED, HIGH);
-    } else { 
+    } else {
       /* GPS not ready */
       //Serial.println();
       Serial.println(F("> GPS NOT READY, not sending"));
+      ESP_BT.println(F("> GPS NOT READY, not sending"));
       //Serial.println(gps.hdop.value());
       u8x8.drawString(0, 7, "NO_GPS_WAIT    ");
       /* Schedule next transmission in TX_WAIT_INTERVAL seconds */
       os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(TX_WAIT_INTERVAL), do_send);
     }
-  } 
+  }
   /* Next TX is scheduled after TX_COMPLETE event. */
 }
 
 void setup() {
   /* Start serial */
   Serial.begin(115200);
-
+  ESP_BT.begin();
   /* Turn off WiFi and Bluetooth */
   WiFi.mode(WIFI_OFF);
-  btStop();
+
 
   /* Turn on Vext pin fpr GPS power */
   Serial.println("Turning on Vext pins for GPS ...");
+  ESP_BT.println(F("Turning on Vext pins for GPS ..."));
   pinMode(Vext, OUTPUT);
   digitalWrite(Vext, LOW);
 
   Serial.println("Waiting 2 seconds for GPS to power on ...");
+  ESP_BT.println("Waiting 2 seconds for GPS to power on ...");
   delay(2000);
 
   /* Initialize GPS */
@@ -420,55 +467,123 @@ void setup() {
 
   /* Initialize LMIC */
   os_init();
-
-  /* Reset the MAC state. Session and pending data transfers will be discarded. */
-  LMIC_reset();
-
-  uint8_t appskey[sizeof(APPSKEY)];
-  uint8_t nwkskey[sizeof(NWKSKEY)];
-  memcpy_P(appskey, APPSKEY, sizeof(APPSKEY));
-  memcpy_P(nwkskey, NWKSKEY, sizeof(NWKSKEY));
-  LMIC_setSession (0x1, DEVADDR, nwkskey, appskey);
-
-  /* Define all usable channels and data rates (SF) on EU_868 */
-  LMIC_setupChannel(0, 868100000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
-  LMIC_setupChannel(1, 868300000, DR_RANGE_MAP(DR_SF12, DR_SF7B), BAND_CENTI);      // g-band
-  LMIC_setupChannel(2, 868500000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
-  LMIC_setupChannel(3, 867100000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
-  LMIC_setupChannel(4, 867300000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
-  LMIC_setupChannel(5, 867500000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
-  LMIC_setupChannel(6, 867700000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
-  LMIC_setupChannel(7, 867900000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
-  LMIC_setupChannel(8, 868800000, DR_RANGE_MAP(DR_FSK,  DR_FSK),  BAND_MILLI);      // g2-band
-
-  /* For testing: Define a fixed single channel and data rate (SF) to use */
-  // int channel = 0;
-
-  /* For Testing: Disable all channels, except for the one defined above. */
-  /*
-  for(int i=0; i<9; i++) { // "i<9" For EU; for US use "i<71"
-    if(i != channel) {
-      LMIC_disableChannel(i);
-    }
-  }
-  */
+  ch_reset();
   
-  /* Disable link check validation */
-  LMIC_setLinkCheckMode(0);
+  for(int i=3; i<9; i++) { // "enable 0-2 for TTN as standard"
+                 LMIC_disableChannel(i);
+                }
+      
 
-  /* TTN uses SF9 for its RX2 window. */
-  LMIC.dn2Dr = DR_SF9;
+   
 
-  /* Set data rate SF7 for mapping and transmit power for uplink (note: TXpow seems to be ignored by the library) */
-  LMIC_setDrTxpow(DR_SF7,14); 
-  
   /* Start sending job */
   do_send(&sendjob);
   pinMode(BUILTIN_LED, OUTPUT);
   digitalWrite(BUILTIN_LED, LOW);
 }
 
+
+void ch_reset(){
+
+  LMIC_reset();
+    uint8_t appskey[sizeof(APPSKEY)];
+    uint8_t nwkskey[sizeof(NWKSKEY)];
+    memcpy_P(appskey, APPSKEY, sizeof(APPSKEY));
+    memcpy_P(nwkskey, NWKSKEY, sizeof(NWKSKEY));
+    LMIC_setSession (0x1, DEVADDR, nwkskey, appskey);
+	
+ /* set the channels for eu868, have a look at channel 0-2 for TTN */
+    LMIC_setupChannel(0, 868100000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
+    LMIC_setupChannel(1, 868300000, DR_RANGE_MAP(DR_SF12, DR_SF7B), BAND_CENTI);      // g-band
+    LMIC_setupChannel(2, 868500000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
+    LMIC_setupChannel(3, 867100000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
+    LMIC_setupChannel(4, 867300000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
+    LMIC_setupChannel(5, 867500000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
+    LMIC_setupChannel(6, 867700000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
+    LMIC_setupChannel(7, 867900000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
+    LMIC_setupChannel(8, 868800000, DR_RANGE_MAP(DR_FSK,  DR_FSK),  BAND_MILLI);      // g2-band
+    LMIC_setLinkCheckMode(0);
+    LMIC.dn2Dr = DR_SF9;
+    LMIC_setDrTxpow(DR_SF7,14);
+
+
+
+}
+
+void bluettooth_data(){
+
+  /* Read data from the BT Serial */
+while (ESP_BT.available()) {
+   char c = ESP_BT.read();
+   BT_state += c;
+   BT_new_data = true;
+   }
+
+  if (BT_state.length() > 0 && BT_new_data) {
+    
+    
+    if (BT_state == "Ch0"){channel = 0; new_channel = true; ch_reset();}
+    if (BT_state == "Ch1"){channel = 1; new_channel = true; ch_reset();}
+    if (BT_state == "Ch2"){channel = 2; new_channel = true; ch_reset();}
+    if (BT_state == "Ch3"){channel = 3; new_channel = true; ch_reset();}
+    if (BT_state == "Ch4"){channel = 4; new_channel = true; ch_reset();}
+    if (BT_state == "Ch5"){channel = 5; new_channel = true; ch_reset();}
+    if (BT_state == "Ch6"){channel = 6; new_channel = true; ch_reset();}
+    if (BT_state == "Ch7"){channel = 7; new_channel = true; ch_reset();}
+    if (BT_state == "Ch8"){channel = 8; new_channel = true; ch_reset();}
+    if (BT_state == "Ch0-8"){enable_ch08 = true; ch_reset();}
+    if (BT_state == "Ch0-2"){enable_ch02 = true; ch_reset();}
+
+    if(new_channel == true ){
+      for(int i=0; i<9; i++) { // "i<9" For EU; for US use "i<71"
+        if(i != channel) {
+          LMIC_disableChannel(i);
+            }
+          }
+      new_channel = false;
+    }
+
+    if(enable_ch02 == true ){
+      for(int i=3; i<9; i++) { // "i<9" For EU; for US use "i<71"
+                 LMIC_disableChannel(i);
+                }
+      enable_ch02 = false;
+        }
+    
+    if (BT_state == "SF7"){SF_state = 7;}
+    if (BT_state == "SF8"){SF_state = 8;}
+    if (BT_state == "SF9"){SF_state = 9;}
+    if (BT_state == "SF10"){SF_state = 10;}
+    if (BT_state == "SF11"){SF_state = 11;}
+    if (BT_state == "SF12"){SF_state = 12;}
+
+    switch (SF_state){
+        case 7:LMIC_setDrTxpow(DR_SF7,14);break;
+        case 8:LMIC_setDrTxpow(DR_SF8,14);break;
+        case 9:LMIC_setDrTxpow(DR_SF9,14);break;
+        case 10:LMIC_setDrTxpow(DR_SF10,14);break;
+        case 11:LMIC_setDrTxpow(DR_SF11,14);break;
+        case 12:LMIC_setDrTxpow(DR_SF12,14);break;
+    }
+    
+
+    do_send(&sendjob);
+    Serial.print(F("> New set: "));
+    Serial.println(BT_state);
+    u8x8.drawString(0, 7, "New set:        ");
+    ESP_BT.print(F("> New set: "));
+    ESP_BT.println(BT_state);
+
+    BT_state ="";
+    BT_new_data = false;
+
+      }
+}
+
+
 void loop() {
   /* The loop */
   os_runloop_once();
+  bluettooth_data();
 }
+
